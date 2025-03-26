@@ -1,5 +1,5 @@
+# InsultFilter
 import redis
-
 import sys
 sys.path.append("..")  # Adds the parent directory to the module search path
 import insults

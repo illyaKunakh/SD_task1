@@ -1,3 +1,4 @@
+# InsultFilter
 import pika
 
 # Connect to RabbitMQ
