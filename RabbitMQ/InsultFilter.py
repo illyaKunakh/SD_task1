@@ -1,19 +1,25 @@
-# InsultFilter
 import pika
+import multiprocessing
 
-# Connect to RabbitMQ
-connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-channel = connection.channel()
+filtered = []
 
-# Declare a queue (ensure it exists)
-channel.queue_declare(queue='hello')
+def filter_text(text):
+    return "CENSORED" if text.lower() in ["insult1", "insult2"] else text
 
-# Define the callback function
-def callback(ch, method, properties, body):
-    print(f" [x] Received {body.decode()}")
+def receive():
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
+    ch.queue_declare(queue='texts')
+    ch.basic_consume(queue='texts', on_message_callback=lambda ch, method, props, body: [filtered.append(filter_text(body.decode())), ch.basic_ack(method.delivery_tag)], auto_ack=False)
+    ch.start_consuming()
 
-# Consume messages
-channel.basic_consume(queue='hello', on_message_callback=callback, auto_ack=True)
+def list_filtered():
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
+    ch.queue_declare(queue='texts_list')
+    ch.basic_consume(queue='texts_list', on_message_callback=lambda ch, method, props, body: [ch.basic_publish('', props.reply_to, ';'.join(filtered).encode()), ch.basic_ack(method.delivery_tag)], auto_ack=False)
+    ch.start_consuming()
 
-print(' [*] Waiting for messages. To exit, press CTRL+C')
-channel.start_consuming()
+if __name__ == "__main__":
+    multiprocessing.Process(target=receive).start()
+    multiprocessing.Process(target=list_filtered).start()

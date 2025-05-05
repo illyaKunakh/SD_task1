@@ -1,29 +1,23 @@
-# InsultFilter
 import redis
-import sys
-sys.path.append("..")  # Adds the parent directory to the module search path
-import insults
+import multiprocessing
 
+r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
-# Connect to Redis
-client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+def filter_text(text):
+    return "CENSORED" if text.lower() in ["insult1", "insult2"] else text
 
+def receive():
+    while True:
+        r.rpush('filtered', filter_text(r.blpop('texts_queue')[1]))
 
-queue_name = "task_queue"
-processed_set = "processed_tasks"
+def list_filtered():
+    ps = r.pubsub()
+    ps.subscribe('texts_list')
+    for msg in ps.listen():
+        if msg['type'] == 'message':
+            r.publish('texts_response', ';'.join(r.lrange('filtered', 0, -1)) or 'empty')
 
-print("Consumer is waiting for tasks...")
-
-while True:
-    task = client.blpop(queue_name, timeout=0)  # Blocks indefinitely until a task is available
-    if task:
-        if client.sismember(processed_set, task[1]):
-            print("Duplicate ignored: " + task[1])
-        else:
-            if task[1] in insults.insults:
-                client.sadd(processed_set, "CENSORED")
-                print("Consumed: 'CENSORED'")
-            else:
-                client.sadd(processed_set, task[1])
-                print("Consumed: " + task[1])
-
+if __name__ == "__main__":
+    r.delete('filtered', 'texts_queue')
+    multiprocessing.Process(target=receive).start()
+    multiprocessing.Process(target=list_filtered).start()
