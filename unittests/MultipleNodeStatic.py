@@ -1,282 +1,188 @@
+# File: MultipleNodeStatic.py
 import os
+import sys
 import pika
 import redis
 import multiprocessing
 import time
 import matplotlib.pyplot as plt
-import sys
 import random
 from functools import partial
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import insults
-import text
+# Añadir la carpeta raíz al path para poder importar RabbitMQ/ y Redis/ como paquetes
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, ROOT)
 
+# Importar servicios y filtros desde los paquetes
+from RabbitMQ.InsultService import receive as rmq_receive, broadcast as rmq_broadcast, list_insults as rmq_list
+from RabbitMQ.InsultFilter  import receive as rmq_filter_receive, list_filtered as rmq_filter_list
 
-BATCH_SIZE = 50  # Every batch has X messages
+from Redis.InsultService import receive as rds_receive, broadcast as rds_broadcast, list_insults as rds_list
+from Redis.InsultFilter  import receive as rds_filter_receive, list_filtered as rds_filter_list
+
+# Parámetros de la prueba
+BATCH_SIZE = 50    # Mensajes por lote
 TOTAL_REQUESTS = 5000
 
+# Worker RabbitMQ InsultService
 def rabbitmq_worker_insult(worker_id, queue_name, num_requests):
-    """Worker that sends insults in batches"""
-    # Create connection for this worker
     connection = pika.BlockingConnection(pika.ConnectionParameters(
-        host='localhost',
-        heartbeat=0,  # Improves performance
-        blocked_connection_timeout=300
+        host='localhost', heartbeat=0, blocked_connection_timeout=300
     ))
-    
     channel = connection.channel()
-    
-    #Declare an exchange for broadcasting messages
     exchange_name = 'insults_exchange'
-    channel.exchange_declare(exchange=exchange_name, exchange_type='fanout', durable=True)
-    
-    # Declare a temporary queue for this worker
+    # Exchange in-memory (no durable) for benchmark
+    channel.exchange_declare(exchange=exchange_name, exchange_type='fanout', durable=False)
     result = channel.queue_declare(queue='', exclusive=True)
-    queue_name = result.method.queue
-    
-    # Bind the queue to the exchange
-    channel.queue_bind(exchange=exchange_name, queue=queue_name)
-    
-    # Enable publisher confirmation for better performance
-    channel.confirm_delivery()
-    
+    temp_queue = result.method.queue
+    channel.queue_bind(exchange=exchange_name, queue=temp_queue)
+    # No publisher confirms to maximize throughput
+
     start_time = time.time()
-    
     batch = []
     messages_sent = 0
-    
-    # Use a local copy of insults to avoid constant access to the module
-    local_insults = insults.insults.copy()
-    random.shuffle(local_insults)  # Take random insults
+    # Enviar mensajes de prueba en lotes
     for i in range(num_requests):
-        # Select an insult from the list
-        insult_index = i % len(local_insults)
-        message = local_insults[insult_index]
-        
-        # Add the message to the batch
-        batch.append(message)
-        
-        # When the batch is full or we reach the last message, send it
+        batch.append(f"insult{i}")
         if len(batch) >= BATCH_SIZE or i == num_requests - 1:
             for msg in batch:
-                try:
-                    # Use mandatory=True to ensure the message is routed
-                    channel.basic_publish(
-                        exchange=exchange_name,
-                        routing_key='',  # Not needed for fanout exchange
-                        body=msg.encode(),
-                        properties=pika.BasicProperties(
-                            delivery_mode=2,  # Persistent message
-                        ),
-                        mandatory=True
-                    )
-                    messages_sent += 1
-                except pika.exceptions.UnroutableError:
-                    print(f"Worker {worker_id}: Message was returned undeliverable")
-            
-            # Clear the batch
+                channel.basic_publish(
+                    exchange=exchange_name,
+                    routing_key='',
+                    body=msg.encode(),
+                    properties=pika.BasicProperties(delivery_mode=1),  # transient
+                    mandatory=False
+                )
+                messages_sent += 1
             batch = []
-    
-    elapsed = time.time() - start_time
-    
-    # Assure all messages are sent
+
     connection.close()
-    
+    elapsed = time.time() - start_time
     return elapsed, messages_sent
 
+# Worker Redis InsultService
 def redis_worker_insult(worker_id, queue_name, num_requests):
-    """Worker that sends insults in batches to Redis"""
-    # Create Redis client for this worker
-    client = redis.Redis(
-        host='localhost', 
-        port=6379, 
-        db=0, 
-        decode_responses=True,
-        socket_timeout=5,
-        socket_connect_timeout=10,
-        socket_keepalive=True,
-        health_check_interval=30
-    )
-    
+    client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True,
+                         socket_timeout=5, socket_connect_timeout=10, socket_keepalive=True, health_check_interval=30)
     start_time = time.time()
     messages_sent = 0
-    
-    # Use a local copy of insults to avoid constant access to the module
-    local_insults = insults.insults.copy()
-    random.shuffle(local_insults)  # Take random insults
-    
-    # Each worker has its own queue to avoid colision
     worker_queue = f"{queue_name}_{worker_id}"
-    
-    # Create a pipeline for batch processing
     pipeline = client.pipeline(transaction=False)
-    
+
     for i in range(num_requests):
-        insult_index = i % len(local_insults)
-        message = local_insults[insult_index]
-        pipeline.rpush(worker_queue, message)
-        
-        # Execute the pipeline every BATCH_SIZE messages or at the end
+        pipeline.rpush(worker_queue, f"insult{i}")
         if (i + 1) % BATCH_SIZE == 0 or i == num_requests - 1:
             pipeline.execute()
             messages_sent += min(BATCH_SIZE, num_requests - i + (i % BATCH_SIZE))
             pipeline = client.pipeline(transaction=False)
-    
-    # At the end, transfer the messages to the main queue if needed
-    pipeline = client.pipeline(transaction=False)
-    # Transfer only a sample to the main queue if needed for verification
+
+    # Mover muestra al canal principal
     if worker_id == 0:
-        sample_size = min(10, num_requests)
-        sample = client.lrange(worker_queue, 0, sample_size - 1)
+        sample = client.lrange(worker_queue, 0, min(10, num_requests)-1)
         for item in sample:
-            pipeline.rpush(queue_name, item)
-    
-    pipeline.execute()
-    
+            client.rpush(queue_name, item)
+
     elapsed = time.time() - start_time
     return elapsed, messages_sent
 
+# Funciones de setup/cleanup
+
 def setup_rabbitmq():
-    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    channel = connection.channel()
-    
-    # Clean up any existing queues and exchanges
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
     try:
-        channel.exchange_delete(exchange='insults_exchange')
+        ch.exchange_delete(exchange='insults_exchange')
     except:
         pass
-    
-    # Declare an exchange for broadcasting messages
-    exchange_name = 'insults_exchange'
-    channel.exchange_declare(exchange=exchange_name, exchange_type='fanout', durable=True)
-    
-    # Declare temporary queues for each worker
-    for i in range(3):  # Configure 3 queues for 3 workers
-        try:
-            channel.queue_delete(queue=f'insults_queue_{i}')
-        except:
-            pass
-        result = channel.queue_declare(queue=f'insults_queue_{i}', durable=True)
-        channel.queue_bind(exchange=exchange_name, queue=f'insults_queue_{i}')
-    
-    connection.close()
-
-def cleanup_rabbitmq():
-    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    channel = connection.channel()
-    
-    # Remove the temporary queues
+    # Exchange in-memory (no durable)
+    ch.exchange_declare(exchange='insults_exchange', exchange_type='fanout', durable=False)
     for i in range(3):
         try:
-            channel.queue_delete(queue=f'insults_queue_{i}')
+            ch.queue_delete(queue=f'insults_queue_{i}')
         except:
             pass
-    
-    # Remove the exchange
+        # Queues non-durable for benchmark
+        ch.queue_declare(queue=f'insults_queue_{i}', durable=False)
+        ch.queue_bind(exchange='insults_exchange', queue=f'insults_queue_{i}')
+    conn.close()
+
+
+def cleanup_rabbitmq():
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
+    for i in range(3):
+        try:
+            ch.queue_delete(queue=f'insults_queue_{i}')
+        except:
+            pass
     try:
-        channel.exchange_delete(exchange='insults_exchange')
+        ch.exchange_delete(exchange='insults_exchange')
     except:
         pass
-    
-    connection.close()
+    conn.close()
+
 
 def setup_redis():
     client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    
-    # Clean up any existing keys
-    keys_to_delete = []
     for key in client.scan_iter("task_queue*"):
-        keys_to_delete.append(key)
-    
-    if keys_to_delete:
-        client.delete(*keys_to_delete)
-    
-    # Configure Redis for testing
+        client.delete(key)
     try:
-        client.config_set('timeout', '0')  # Deactivate timeout
+        client.config_set('timeout', '0')
     except:
-        print("Could not set Redis timeout to 0, continuing anyway")
+        pass
+
 
 def cleanup_redis():
     client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    
-    # Clean up any existing keys
-    keys_to_delete = []
     for key in client.scan_iter("task_queue*"):
-        keys_to_delete.append(key)
-    
-    if keys_to_delete:
-        client.delete(*keys_to_delete)
+        client.delete(key)
 
-def run_test(num_nodes, test_func, queue_name):
-    """Ejecutar prueba con el número especificado de nodos"""
+# Función de ejecución de prueba
+
+def run_test(num_nodes, worker_func, queue_name):
     num_requests = TOTAL_REQUESTS // num_nodes
-    
-    # For both RabbitMQ and Redis, we will use multiprocessing to simulate multiple nodes
+    task = partial(worker_func, queue_name=queue_name, num_requests=num_requests)
     with multiprocessing.Pool(processes=num_nodes) as pool:
-        # Use partial to pass additional arguments to the worker function
-        worker_func = partial(test_func, queue_name=queue_name, num_requests=num_requests)
-        # ID of the worker is passed automatically by the pool
-        results = pool.map(worker_func, range(num_nodes))
-    
-    # Calculate the maximum time taken by any worker
-    max_time = max(result[0] for result in results)
-    total_messages = sum(result[1] for result in results)
-    
-    print(f"    Total messages processed: {total_messages}")
+        results = pool.map(task, range(num_nodes))
+    max_time = max(r[0] for r in results)
+    total_msgs = sum(r[1] for r in results)
+    print(f"Total messages: {total_msgs}")
     return max_time
 
+# Bloque principal
 if __name__ == "__main__":
     nodes = [1, 2, 3]
-    rabbitmq_insult_times = []
-    redis_insult_times = []
-    
+    rabbit_times = []
+    redis_times = []
+
     setup_rabbitmq()
     setup_redis()
-    
     try:
         print("Starting performance tests...")
         for n in nodes:
             print(f"Testing with {n} nodes...")
-            
-            # Execute RabbitMQ test
-            print(f"  - RabbitMQ test with {n} nodes...")
-            t_rabbitmq = run_test(n, rabbitmq_worker_insult, 'insults_input')
-            rabbitmq_insult_times.append(t_rabbitmq)
-            print(f"    Completed in {t_rabbitmq:.2f} seconds")
-            
-            # Execute Redis test
-            print(f"  - Redis test with {n} nodes...")
-            t_redis = run_test(n, redis_worker_insult, 'task_queue')
-            redis_insult_times.append(t_redis)
-            print(f"    Completed in {t_redis:.2f} seconds")
-        
-        # Calculate speedup
-        rabbitmq_speedups = [rabbitmq_insult_times[0] / t for t in rabbitmq_insult_times]
-        redis_speedups = [redis_insult_times[0] / t for t in redis_insult_times]
-        
-        print("\nResults:")
-        print("RabbitMQ Speedups:", [f"{s:.2f}" for s in rabbitmq_speedups])
-        print("Redis Speedups:", [f"{s:.2f}" for s in redis_speedups])
-        
-        # Create a plot for the results
+            t1 = run_test(n, rabbitmq_worker_insult, 'insults_input')
+            rabbit_times.append(t1)
+            print(f" RabbitMQ: {t1:.2f}s")
+            t2 = run_test(n, redis_worker_insult, 'task_queue')
+            redis_times.append(t2)
+            print(f" Redis: {t2:.2f}s")
+
+        # Velocidades relativas
+        speed_rmq = [rabbit_times[0] / t for t in rabbit_times]
+        speed_rds = [redis_times[0] / t for t in redis_times]
         plt.figure(figsize=(10, 6))
-        plt.plot(nodes, rabbitmq_speedups, 'o-', label='RabbitMQ InsultService', linewidth=2)
-        plt.plot(nodes, redis_speedups, 's-', label='Redis InsultService', linewidth=2)
-        
-        # Add ideal speedup line
-        plt.plot(nodes, nodes, '--', label='Ideal Speedup', color='gray', alpha=0.7)
-        
-        plt.xlabel('Number of Nodes')
-        plt.ylabel('Speedup (S = T1 / TN)')
-        plt.title('Static Scaling Performance')
+        plt.plot(nodes, speed_rmq, 'o-', label='RabbitMQ', linewidth=2)
+        plt.plot(nodes, speed_rds, 's-', label='Redis', linewidth=2)
+        plt.plot(nodes, nodes, '--', label='Ideal', alpha=0.7)
+        plt.xlabel('Nodes')
+        plt.ylabel('Speedup')
+        plt.title('Static Scaling')
         plt.legend()
-        plt.grid(True, alpha=0.3)
+        plt.grid(alpha=0.3)
         plt.savefig('static_scaling.png', dpi=300, bbox_inches='tight')
         plt.show()
-        
     finally:
-        # Cleanup resources
         cleanup_rabbitmq()
         cleanup_redis()
+
