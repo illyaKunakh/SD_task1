@@ -6,143 +6,115 @@ import pika
 import redis
 import matplotlib.pyplot as plt
 
-# Añadir la carpeta raíz al path para poder importar filtros
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT)
 
-from RabbitMQ.InsultFilter import filter_text as rmq_filter_text
-from Redis.InsultFilter import filter_text as rds_filter_text
+from RabbitMQ.InsultService import receive as rmq_insult_receive, list_insults as rmq_list_insults
+from RabbitMQ.InsultFilter import receive as rmq_filter_receive, list_filtered as rmq_list_filtered
+from Redis.InsultService import receive as rds_insult_receive, list_insults as rds_list_insults
+from Redis.InsultFilter import receive as rds_filter_receive, list_filtered as rds_list_filtered
 
-# Worker RabbitMQ InsultService para test de throughput
-def rabbitmq_insult_worker(processed):
+def setup_rabbitmq():
     conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     ch = conn.channel()
-    ch.queue_declare(queue='insults', durable=False)
+    for queue in ['insults', 'texts', 'insults_list', 'texts_list']:
+        try:
+            ch.queue_delete(queue=queue)
+        except:
+            pass
+    conn.close()
+
+def setup_redis():
+    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    for key in ['insults_queue', 'texts_queue', 'insults', 'filtered']:
+        r.delete(key)
+
+def test_rabbitmq(queue, receive_func, list_func, list_queue):
+    processed = multiprocessing.Value('i', 0)
+    p_receive = multiprocessing.Process(target=receive_func)
+    p_list = multiprocessing.Process(target=list_func)
+    p_receive.start()
+    p_list.start()
+    time.sleep(0.5)
+
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
+    ch.queue_declare(queue=queue, durable=False)
+    ch.queue_declare(queue=list_queue, durable=False)
+    reply_queue = ch.queue_declare(queue='', exclusive=True).method.queue
+
+    start = time.time()
+    for i in range(1000):
+        ch.basic_publish(exchange='', routing_key=queue, body=f"{queue[:-1]}{i}".encode())
+    time.sleep(0.3)
+    ch.basic_publish(exchange='', routing_key=list_queue, body='list', properties=pika.BasicProperties(reply_to=reply_queue))
+
     def callback(ch, method, props, body):
         with processed.get_lock():
-            processed.value += 1
+            processed.value = len(body.decode().split(';')) if body.decode() != 'empty' else 0
         ch.basic_ack(delivery_tag=method.delivery_tag)
-    ch.basic_consume(queue='insults', on_message_callback=callback)
-    ch.start_consuming()
 
-# Worker RabbitMQ InsultFilter para test de throughput
-def rabbitmq_filter_worker(processed):
-    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    ch = conn.channel()
-    ch.queue_declare(queue='texts', durable=False)
-    def callback(ch, method, props, body):
-        # aplicar filtro importado
-        _ = rmq_filter_text(body.decode())
-        with processed.get_lock():
-            processed.value += 1
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    ch.basic_consume(queue='texts', on_message_callback=callback)
-    ch.start_consuming()
-
-# Worker Redis InsultService para test
-def redis_insult_worker(processed):
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    while True:
-        _, insult = r.blpop('insults_queue')
-        with processed.get_lock():
-            processed.value += 1
-
-# Worker Redis InsultFilter para test
-def redis_filter_worker(processed):
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    while True:
-        _, text = r.blpop('texts_queue')
-        _ = rds_filter_text(text)
-        with processed.get_lock():
-            processed.value += 1
-
-# Test RabbitMQ InsultService
-def test_rabbitmq_insult():
-    processed = multiprocessing.Value('i', 0)
-    p = multiprocessing.Process(target=rabbitmq_insult_worker, args=(processed,))
-    p.start()
-    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    ch = conn.channel()
-    ch.queue_declare(queue='insults', durable=False)
-    start = time.time()
-    for i in range(1000):
-        ch.basic_publish(exchange='', routing_key='insults', body=f"insult{i}".encode())
-    while processed.value < 1000:
-        time.sleep(0.01)
+    ch.basic_consume(queue=reply_queue, on_message_callback=callback)
+    timeout = time.time() + 5
+    while processed.value < 1000 and time.time() < timeout:
+        conn.process_data_events(time_limit=0.01)
+    
     elapsed = time.time() - start
-    p.terminate()
+    p_receive.terminate()
+    p_list.terminate()
     conn.close()
-    return 1000 / elapsed
+    return 1000 / elapsed if elapsed > 0 else 0
 
-# Test RabbitMQ InsultFilter
-def test_rabbitmq_filter():
-    processed = multiprocessing.Value('i', 0)
-    p = multiprocessing.Process(target=rabbitmq_filter_worker, args=(processed,))
-    p.start()
-    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    ch = conn.channel()
-    ch.queue_declare(queue='texts', durable=False)
-    start = time.time()
-    for i in range(1000):
-        ch.basic_publish(exchange='', routing_key='texts', body=f"text{i}".encode())
-    while processed.value < 1000:
-        time.sleep(0.01)
-    elapsed = time.time() - start
-    p.terminate()
-    conn.close()
-    return 1000 / elapsed
-
-# Test Redis InsultService
-def test_redis_insult():
+def test_redis(queue, receive_func, list_func, list_channel, response_channel):
     r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    r.delete('insults_queue')
+    r.delete(queue, queue[:-6])
     processed = multiprocessing.Value('i', 0)
-    p = multiprocessing.Process(target=redis_insult_worker, args=(processed,))
-    p.start()
+    p_receive = multiprocessing.Process(target=receive_func)
+    p_list = multiprocessing.Process(target=list_func)
+    p_receive.start()
+    p_list.start()
+    time.sleep(0.5)
+
     start = time.time()
     for i in range(1000):
-        r.rpush('insults_queue', f"insult{i}")
-    while processed.value < 1000:
-        time.sleep(0.01)
-    elapsed = time.time() - start
-    p.terminate()
-    return 1000 / elapsed
+        r.rpush(queue, f"{queue[:-6]}{i}")
+    time.sleep(0.3)
+    r.publish(list_channel, 'list')
 
-# Test Redis InsultFilter
-def test_redis_filter():
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    r.delete('texts_queue')
-    processed = multiprocessing.Value('i', 0)
-    p = multiprocessing.Process(target=redis_filter_worker, args=(processed,))
-    p.start()
-    start = time.time()
-    for i in range(1000):
-        r.rpush('texts_queue', f"text{i}")
-    while processed.value < 1000:
+    ps = r.pubsub()
+    ps.subscribe(response_channel)
+    timeout = time.time() + 5
+    while processed.value < 1000 and time.time() < timeout:
+        message = ps.get_message(timeout=0.01)
+        if message and message['type'] == 'message':
+            with processed.get_lock():
+                processed.value = len(message['data'].split(';')) if message['data'] != 'empty' else 0
         time.sleep(0.01)
+    
     elapsed = time.time() - start
-    p.terminate()
-    return 1000 / elapsed
+    p_receive.terminate()
+    p_list.terminate()
+    return 1000 / elapsed if elapsed > 0 else 0
 
-# Bloque principal
 def main():
-    print(f"RabbitMQ Insult: {test_rabbitmq_insult():.2f} req/s")
-    print(f"RabbitMQ Filter: {test_rabbitmq_filter():.2f} req/s")
-    print(f"Redis Insult: {test_redis_insult():.2f} req/s")
-    print(f"Redis Filter: {test_redis_filter():.2f} req/s")
-
-    rates = [
-        test_rabbitmq_insult(),
-        test_redis_insult(),
-        test_rabbitmq_filter(),
-        test_redis_filter()
+    setup_rabbitmq()
+    setup_redis()
+    results = [
+        test_rabbitmq('insults', rmq_insult_receive, rmq_list_insults, 'insults_list'),
+        test_rabbitmq('texts', rmq_filter_receive, rmq_list_filtered, 'texts_list'),
+        test_redis('insults_queue', rds_insult_receive, rds_list_insults, 'insults_list', 'insults_response'),
+        test_redis('texts_queue', rds_filter_receive, rds_list_filtered, 'texts_list', 'texts_response')
     ]
-    labels = ['RabbitMQ Insult', 'Redis Insult', 'RabbitMQ Filter', 'Redis Filter']
-    plt.bar(labels, rates)
+    labels = ['RabbitMQ Insult', 'RabbitMQ Filter', 'Redis Insult', 'Redis Filter']
+    for label, reqs in zip(labels, results):
+        print(f"{label}: {reqs:.2f} req/s")
+    
+    plt.bar(labels, results)
     plt.ylabel('Requests per second')
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig('single_node.png')
+    plt.show()
 
 if __name__ == '__main__':
     main()

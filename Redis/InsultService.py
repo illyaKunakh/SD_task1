@@ -1,29 +1,22 @@
 import redis
-import multiprocessing
-import random
+import threading
 import time
+import random
 
 r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
-def receive():
+def broadcaster():
     while True:
-        r.sadd('insults', r.blpop('insults_queue')[1])
-
-def broadcast():
-    while True:
-        if ins := r.smembers('insults'):
-            r.publish('insults_channel', random.choice(list(ins)))
+        insults = r.smembers('insults')
+        if insults:
+            insult = random.choice(list(insults))
+            r.publish('insults_channel', insult)
         time.sleep(5)
 
-def list_insults():
-    ps = r.pubsub()
-    ps.subscribe('insults_list')
-    for msg in ps.listen():
-        if msg['type'] == 'message':
-            r.publish('insults_response', ';'.join(r.smembers('insults')) or 'empty')
-
 if __name__ == "__main__":
-    r.delete('insults', 'insults_queue')
-    multiprocessing.Process(target=receive).start()
-    multiprocessing.Process(target=broadcast).start()
-    multiprocessing.Process(target=list_insults).start()
+    # Iniciar broadcaster en un hilo
+    threading.Thread(target=broadcaster, daemon=True).start()
+    print("Redis InsultService broadcaster iniciado.")
+    # Mantener el servicio corriendo
+    while True:
+        time.sleep(1)
