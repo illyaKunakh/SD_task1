@@ -2,17 +2,57 @@ import os
 import sys
 import time
 import multiprocessing
+import subprocess
+import xmlrpc.client
+import Pyro4
 import pika
 import redis
 import matplotlib.pyplot as plt
+from multiprocessing import Pool
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT)
 
-from RabbitMQ.InsultService import receive as rmq_insult_receive, list_insults as rmq_list_insults
-from RabbitMQ.InsultFilter import receive as rmq_filter_receive, list_filtered as rmq_list_filtered
-from Redis.InsultService import receive as rds_insult_receive, list_insults as rds_list_insults
-from Redis.InsultFilter import receive as rds_filter_receive, list_filtered as rds_list_filtered
+# from RabbitMQ.InsultService import receive as rmq_insult_receive, list_insults as rmq_list_insults
+# from RabbitMQ.InsultFilter import receive as rmq_filter_receive, list_filtered as rmq_list_filtered
+# from Redis.InsultService import receive as rds_insult_receive, list_insults as rds_list_insults
+# from Redis.InsultFilter import receive as rds_filter_receive, list_filtered as rds_list_filtered
+
+def run_task(func, n):
+    return func(n)
+
+def run_xmlrpc_insult_service(num_requests):
+    cli = xmlrpc.client.ServerProxy("http://localhost:8000")
+    start_time = time.time()
+    for i in range(num_requests):
+        cli.add_insult(f"insult{i}")
+    elapsed = time.time() - start_time
+    return num_requests / elapsed 
+
+def run_xmlrpc_insult_filter(num_requests):
+    cli = xmlrpc.client.ServerProxy("http://localhost:8001")
+    start_time = time.time()
+    for i in range(num_requests):
+        cli.filter_text(f"insult{i}")
+    elapsed = time.time() - start_time
+    return num_requests / elapsed
+
+def run_pyro_insult_service(num_requests):
+    proxy = Pyro4.Proxy("PYRONAME:insult.service")
+    start_time = time.time()
+    for i in range(num_requests):
+        proxy.add_insult(f"insult{i}")
+    elapsed = time.time() - start_time
+    return num_requests / elapsed
+
+def run_pyro_insult_filter(num_requests):
+    proxy = Pyro4.Proxy("PYRONAME:insult.filter")
+    start_time = time.time()
+    for i in range(num_requests):
+        proxy.filter_text(f"insult{i}")
+    elapsed = time.time() - start_time
+    return num_requests / elapsed
+
 
 def setup_rabbitmq():
     conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
@@ -97,24 +137,59 @@ def test_redis(queue, receive_func, list_func, list_channel, response_channel):
     return 1000 / elapsed if elapsed > 0 else 0
 
 def main():
-    setup_rabbitmq()
-    setup_redis()
-    results = [
-        test_rabbitmq('insults', rmq_insult_receive, rmq_list_insults, 'insults_list'),
-        test_rabbitmq('texts', rmq_filter_receive, rmq_list_filtered, 'texts_list'),
-        test_redis('insults_queue', rds_insult_receive, rds_list_insults, 'insults_list', 'insults_response'),
-        test_redis('texts_queue', rds_filter_receive, rds_list_filtered, 'texts_list', 'texts_response')
-    ]
-    labels = ['RabbitMQ Insult', 'RabbitMQ Filter', 'Redis Insult', 'Redis Filter']
-    for label, reqs in zip(labels, results):
-        print(f"{label}: {reqs:.2f} req/s")
-    
-    plt.bar(labels, results)
-    plt.ylabel('Requests per second')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig('single_node.png')
-    plt.show()
+    # setup_rabbitmq()
+    # setup_redis()
+
+    processes = []
+    try: 
+        processes.append(subprocess.Popen(["python", "-m", "Pyro4.naming"]))
+        processes.append(subprocess.Popen(["python", "./XMLRPC/InsultService.py"]))
+        processes.append(subprocess.Popen(["python", "./XMLRPC/InsultFilter.py"]))
+        processes.append(subprocess.Popen(["python", "./Pyro/InsultService.py"]))
+        processes.append(subprocess.Popen(["python", "./Pyro/InsultFilter.py"]))
+        time.sleep(2)  
+
+        with Pool(4) as pool:
+            xmlrpc_results = pool.starmap(run_task, [
+                (run_xmlrpc_insult_service, 100),
+                (run_xmlrpc_insult_filter, 100)
+            ])
+
+        with Pool(4) as pool:
+            pyro_results = pool.starmap(run_task, [
+                (run_pyro_insult_service, 1000),
+                (run_pyro_insult_filter, 1000)
+            ])
+
+        # mq_results = [
+        #     test_rabbitmq('insults', rmq_insult_receive, rmq_list_insults, 'insults_list'),
+        #     test_rabbitmq('texts', rmq_filter_receive, rmq_list_filtered, 'texts_list'),
+        #     test_redis('insults_queue', rds_insult_receive, rds_list_insults, 'insults_list', 'insults_response'),
+        #     test_redis('texts_queue', rds_filter_receive, rds_list_filtered, 'texts_list', 'texts_response')
+        # ]
+
+        all_results = xmlrpc_results + pyro_results #+ mq_results
+        labels = [
+            'XML-RPC Insult', 'XML-RPC Filter',
+            'Pyro Insult', 'Pyro Filter'#,
+            # 'RabbitMQ Insult', 'RabbitMQ Filter', 
+            # 'Redis Insult', 'Redis Filter'
+        ]
+        
+        for label, reqs in zip(labels, all_results):
+            print(f"{label}: {reqs:.2f} req/s")
+        
+        plt.bar(labels, all_results)
+        plt.ylabel('Requests per second')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig('single_node_all.png')
+        plt.show()
+
+    finally:
+        for p in processes:
+            p.terminate()
+            p.wait()
 
 if __name__ == '__main__':
     main()
