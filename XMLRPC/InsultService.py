@@ -16,7 +16,9 @@ class InsultService:
 
     def broadcaster(self):
         # XMLRPC no soporta broadcasting directo, se simula con polling
-        pass
+         if insults:
+            return random.choice(list(insults))
+        return None
 
 if __name__ == "__main__":
     server = SimpleXMLRPCServer(("localhost", 8000))
