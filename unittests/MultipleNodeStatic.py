@@ -1,146 +1,153 @@
-import os
-import sys
-import pika
-import redis
-import multiprocessing
-import time
-import matplotlib.pyplot as plt
-from functools import partial
+#!/usr/bin/env python3
+"""
+Static scaling test (1, 2, 3 nodes) for four techs.
 
-# Add root directory to path
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, ROOT)
+Each worker sends blocking calls.  
+We time how long and draw a speed-up graph.
 
-# Import services and filters
-from RabbitMQ.InsultService import receive as rmq_receive, broadcast as rmq_broadcast, list_insults as rmq_list
-from RabbitMQ.InsultFilter  import receive as rmq_filter_receive, list_filtered as rmq_filter_list
-from Redis.InsultService import receive as rds_receive, broadcast as rds_broadcast, list_insults as rds_list
-from Redis.InsultFilter  import receive as rds_filter_receive, list_filtered as rds_filter_list
+It saves static_scaling.png
+"""
+import os, sys, time, subprocess, multiprocessing as mp, socket
+import pika, redis, matplotlib.pyplot as plt
 
-BATCH_SIZE = 50    # Messages / batch
-TOTAL_REQUESTS = 5000
+BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(BASE); import insults   # simple list of insults
 
-# Worker RabbitMQ InsultService
-def rabbitmq_worker_insult(worker_id, queue_name, num_requests):
-    connection = pika.BlockingConnection(pika.ConnectionParameters(
-        host='localhost', heartbeat=0, blocked_connection_timeout=300
-    ))
-    channel = connection.channel()
-    channel.queue_declare(queue=queue_name, durable=False)
+TOTAL_REQUESTS = 30_000    # total calls per tech
+BATCH_SIZE     = 500       # Redis pipeline flush size
 
-    start_time = time.time()
-    batch = []
-    messages_sent = 0
-    for i in range(num_requests):
-        batch.append(f"insult{i}")
-        if len(batch) >= BATCH_SIZE or i == num_requests - 1:
-            for msg in batch:
-                channel.basic_publish(
-                    exchange='',
-                    routing_key=queue_name,
-                    body=msg.encode(),
-                    properties=pika.BasicProperties(delivery_mode=2),
-                )
-                messages_sent += 1
-            batch = []
+# ------ small helper -------------------------------------------------
+def wait_port(host, port, t=5.0):
+    """Wait until TCP <host:port> is ready."""
+    start = time.time()
+    while time.time() - start < t:
+        try:
+            with socket.create_connection((host, port), 1):
+                return
+        except OSError:
+            time.sleep(0.2)
+    raise RuntimeError(f"{host}:{port} not ready")
 
-    connection.close()
-    elapsed = time.time() - start_time
-    return elapsed, messages_sent
+# ------ RabbitMQ / Redis clean-up -----------------------------------
+def setup_rabbitmq(n_workers):
+    """Create a fan-out exchange and n empty queues."""
+    con = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch  = con.channel()
 
-# Worker Redis InsultService
-def redis_worker_insult(worker_id, queue_name, num_requests):
-    client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True,
-                         socket_timeout=5, socket_connect_timeout=10, socket_keepalive=True, health_check_interval=30)
-    start_time = time.time()
-    messages_sent = 0
-    pipeline = client.pipeline(transaction=False)
+    try:
+        ch.exchange_delete(exchange='insults_exchange')
+    except pika.exceptions.ChannelClosedByBroker:
+        ch = con.channel()     # exchange did not exist
 
-    for i in range(num_requests):
-        pipeline.rpush(queue_name, f"insult{i}")
-        if (i + 1) % BATCH_SIZE == 0 or i == num_requests - 1:
-            pipeline.execute()
-            messages_sent += min(BATCH_SIZE, num_requests - i + (i % BATCH_SIZE))
-            pipeline = client.pipeline(transaction=False)
+    ch.exchange_declare('insults_exchange', 'fanout', durable=False)
 
-    elapsed = time.time() - start_time
-    return elapsed, messages_sent
-
-# Setup and cleanup functions
-def setup_rabbitmq():
-    global rmq_receive_process, rmq_broadcast_process, rmq_list_process
-    rmq_receive_process = multiprocessing.Process(target=rmq_receive)
-    rmq_broadcast_process = multiprocessing.Process(target=rmq_broadcast)
-    rmq_list_process = multiprocessing.Process(target=rmq_list)
-    rmq_receive_process.start()
-    rmq_broadcast_process.start()
-    rmq_list_process.start()
-    time.sleep(1)  # Allow time for processes to start
-
-def cleanup_rabbitmq():
-    rmq_receive_process.terminate()
-    rmq_broadcast_process.terminate()
-    rmq_list_process.terminate()
+    for i in range(n_workers):
+        q = f'insults_queue_{i}'
+        ch.queue_delete(queue=q)
+        ch.queue_declare(queue=q, durable=False)
+        ch.queue_bind(queue=q, exchange='insults_exchange')
+    con.close()
 
 def setup_redis():
-    global rds_receive_process, rds_broadcast_process, rds_list_process
-    rds_receive_process = multiprocessing.Process(target=rds_receive)
-    rds_broadcast_process = multiprocessing.Process(target=rds_broadcast)
-    rds_list_process = multiprocessing.Process(target=rds_list)
-    rds_receive_process.start()
-    rds_broadcast_process.start()
-    rds_list_process.start()
-    time.sleep(1)  # Allow time for processes to start
+    """Flush all keys for a fresh test."""
+    redis.Redis().flushdb()
 
-def cleanup_redis():
-    rds_receive_process.terminate()
-    rds_broadcast_process.terminate()
-    rds_list_process.terminate()
+# ------ worker code for each tech -----------------------------------
+def rabbit_worker(n_msgs, evt):
+    con = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch  = con.channel()
+    ch.exchange_declare('bench_ex', 'fanout')
+    evt.wait()                      # start gun
+    body = b'x'*20
+    for _ in range(n_msgs):
+        ch.basic_publish('bench_ex', '', body,
+                         pika.BasicProperties(delivery_mode=1))
+    con.close()
 
-# Test execution function
-def run_test(num_nodes, worker_func, queue_name):
-    num_requests = TOTAL_REQUESTS // num_nodes
-    task = partial(worker_func, queue_name=queue_name, num_requests=num_requests)
-    with multiprocessing.Pool(processes=num_nodes) as pool:
-        results = pool.map(task, range(num_nodes))
-    max_time = max(r[0] for r in results)
-    total_msgs = sum(r[1] for r in results)
-    print(f"Total messages: {total_msgs}")
-    return max_time
+def redis_worker(n_msgs, evt):
+    r = redis.Redis()
+    pipe = r.pipeline(); q = "bench_q"
+    evt.wait()
+    for i in range(n_msgs):
+        pipe.rpush(q, b'x'*20)
+        if (i+1) % BATCH_SIZE == 0:
+            pipe.execute()
+    pipe.execute()
 
-# Main block
+def xmlrpc_worker(n_msgs, evt):
+    import xmlrpc.client
+    pr = xmlrpc.client.ServerProxy("http://localhost:8000/")
+    local = insults.insults
+    evt.wait()
+    for i in range(n_msgs):
+        pr.add_insult(local[i % len(local)])
+
+def pyro_worker(n_msgs, evt):
+    import Pyro4
+    ns = Pyro4.locateNS(host="localhost", port=9090, broadcast=False)
+    pr = Pyro4.Proxy(ns.lookup("insult.service"))
+    local = insults.insults
+    evt.wait()
+    for i in range(n_msgs):
+        pr.add_insult(local[i % len(local)])
+
+MAP = {
+    'RabbitMQ': rabbit_worker,
+    'Redis'   : redis_worker,
+    'XML-RPC' : xmlrpc_worker,
+    'Pyro'    : pyro_worker,
+}
+
+def run(kind, nodes):
+    """Start <nodes> workers and time them."""
+    per = TOTAL_REQUESTS // nodes
+    evt = mp.Event()
+    ws  = [mp.Process(target=MAP[kind], args=(per, evt)) for _ in range(nodes)]
+    [p.start() for p in ws]
+    time.sleep(0.2)      # give workers a moment
+    t0 = time.time(); evt.set()   # run
+    [p.join() for p in ws]
+    return time.time() - t0
+
+# ------ main program -------------------------------------------------
 if __name__ == "__main__":
+    mp.freeze_support()
+
+    # start NameServer and two services once
+    procs = []
+    def _p(cmd):
+        procs.append(subprocess.Popen(cmd,
+                                      stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL))
+    _p([sys.executable, "-m", "Pyro4.naming", "-n", "localhost", "-p", "9090"])
+    wait_port("localhost", 9090)
+    _p([sys.executable, os.path.join(BASE, "Pyro",   "InsultService.py")])
+    _p([sys.executable, os.path.join(BASE, "XMLRPC", "InsultService.py")])
+    wait_port("localhost", 8000)
+
     nodes = [1, 2, 3]
-    rabbit_times = []
-    redis_times = []
+    times = {k: [] for k in MAP}
 
-    setup_rabbitmq()
-    setup_redis()
-    try:
-        print("Starting performance tests...")
-        for n in nodes:
-            print(f"Testing with {n} nodes...")
-            t1 = run_test(n, rabbitmq_worker_insult, 'insults')
-            rabbit_times.append(t1)
-            print(f" RabbitMQ: {t1:.2f}s")
-            t2 = run_test(n, redis_worker_insult, 'insults_queue')
-            redis_times.append(t2)
-            print(f" Redis: {t2:.2f}s")
+    for n in nodes:
+        print(f"\n  {n} node(s)")
+        setup_rabbitmq(n)
+        setup_redis()
 
-        # Relative speeds
-        speed_rmq = [rabbit_times[0] / t for t in rabbit_times]
-        speed_rds = [redis_times[0] / t for t in redis_times]
-        plt.figure(figsize=(10, 6))
-        plt.plot(nodes, speed_rmq, 'o-', label='RabbitMQ', linewidth=2)
-        plt.plot(nodes, speed_rds, 's-', label='Redis', linewidth=2)
-        plt.plot(nodes, nodes, '--', label='Ideal', alpha=0.7)
-        plt.xlabel('Nodes')
-        plt.ylabel('Speedup')
-        plt.title('Static Scaling')
-        plt.legend()
-        plt.grid(alpha=0.3)
-        plt.savefig('static_scaling.png', dpi=300, bbox_inches='tight')
-        plt.show()
-    finally:
-        cleanup_rabbitmq()
-        cleanup_redis()
+        for kind in MAP:
+            t = run(kind, n)
+            times[kind].append(t)
+            print(f"   {kind:8}: {t:.2f}s")
+
+    # speed-up = time with 1 node / time with N nodes
+    speed = {k: [times[k][0]/x for x in times[k]] for k in MAP}
+
+    # draw the lines
+    plt.figure(figsize=(7,4))
+    for k, v in speed.items():
+        plt.plot(nodes, v, '-o', label=k)
+    plt.plot(nodes, nodes, '--', alpha=.6, label='Ideal')
+    plt.xlabel("Nodes"); plt.ylabel("Speed-up")
+    plt.legend(); plt.grid(alpha=.3)
+    plt.tight_layout(); plt.savefig("static_scaling.png", dpi=300)
+
+    for p in procs: p.terminate(); p.wait()

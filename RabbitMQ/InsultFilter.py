@@ -1,24 +1,25 @@
 import pika
-import threading
-import time
+import multiprocessing
 
-def worker():
+filtered = []
+
+def filter_text(text):
+    return "CENSORED" if text.lower() in ["insult1", "insult2"] else text
+
+def receive():
     conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     ch = conn.channel()
-    ch.queue_declare(queue='texts', durable=True)
-    def callback(ch, method, props, body):
-        text = body.decode()
-        # Suponiendo que tenemos una lista de insultos
-        insults = ["insult1", "insult2"]
-        filtered = "CENSORED" if text.lower() in insults else text
-        # Almacenar en algún lugar, por ejemplo, imprimir
-        print(f"Filtered: {filtered}")
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    ch.basic_consume(queue='texts', on_message_callback=callback)
+    ch.queue_declare(queue='texts')
+    ch.basic_consume(queue='texts', on_message_callback=lambda ch, method, props, body: [filtered.append(filter_text(body.decode())), ch.basic_ack(method.delivery_tag)], auto_ack=False)
+    ch.start_consuming()
+
+def list_filtered():
+    conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    ch = conn.channel()
+    ch.queue_declare(queue='texts_list')
+    ch.basic_consume(queue='texts_list', on_message_callback=lambda ch, method, props, body: [ch.basic_publish('', props.reply_to, ';'.join(filtered).encode()), ch.basic_ack(method.delivery_tag)], auto_ack=False)
     ch.start_consuming()
 
 if __name__ == "__main__":
-    threading.Thread(target=worker, daemon=True).start()
-    print("RabbitMQ InsultFilter worker iniciado.")
-    while True:
-        time.sleep(1)
+    multiprocessing.Process(target=receive).start()
+    multiprocessing.Process(target=list_filtered).start()

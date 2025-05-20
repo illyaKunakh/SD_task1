@@ -1,55 +1,72 @@
-import unittest
-import redis
-import pika
+#!/usr/bin/env python3
+"""
+Unit tests for InsultFilter (four middlewares).
+
+We start the real servers only for these tests.
+"""
+import os, sys, time, uuid, subprocess, unittest
+import redis, pika, Pyro4
 from xmlrpc.client import ServerProxy
-import Pyro4
-import time
+
+BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 class TestInsultFilter(unittest.TestCase):
+    # ---------- start services once ----------
     @classmethod
     def setUpClass(cls):
-        # Initialize Redis client
-        cls.r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-        # Clear Redis keys
-        cls.r.delete('texts_queue', 'filtered_texts')
+        cls.procs = []
+        def _p(cmd):
+            cls.procs.append(subprocess.Popen(cmd,
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL))
+        _p([sys.executable, "-m", "Pyro4.naming"])
+        _p([sys.executable, os.path.join(BASE,"Pyro","InsultFilter.py")])
+        _p([sys.executable, os.path.join(BASE,"XMLRPC","InsultFilter.py")])
+        _p([sys.executable, os.path.join(BASE,"Redis","InsultFilter.py")])
+        time.sleep(3)
 
-        # Initialize RabbitMQ connection
-        cls.rabbit_conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        cls.rabbit_ch = cls.rabbit_conn.channel()
-        cls.rabbit_ch.queue_declare(queue='texts', durable=True)
+        cls.xml_proxy  = ServerProxy("http://localhost:8001/")
+        cls.pyro_proxy = Pyro4.Proxy("PYRONAME:insult.filter")
+        cls.r          = redis.Redis(decode_responses=True)
+
+        # make sure RabbitMQ queue exists and is empty
+        con = pika.BlockingConnection(pika.ConnectionParameters("localhost"))
+        ch = con.channel(); ch.queue_delete(queue="texts"); ch.queue_declare(queue="texts")
+        con.close()
 
     @classmethod
     def tearDownClass(cls):
-        # Clean up RabbitMQ
-        cls.rabbit_ch.queue_delete(queue='texts')
-        cls.rabbit_conn.close()
+        for p in cls.procs: p.terminate(); p.wait()
 
     def setUp(self):
-        # Clear Redis keys before each test
-        self.r.delete('texts_queue', 'filtered_texts')
+        # clean Redis lists before each test
+        self.r.delete("texts_queue", "filtered")
 
+    # ---------- real tests ----------
     def test_xmlrpc_filter_text(self):
-        proxy = ServerProxy("http://localhost:8001")
-        result = proxy.filter_text("insult1")
-        self.assertEqual(result, "CENSORED")
+        self.assertEqual(self.xml_proxy.filter_text("insult1"), "CENSORED")
+        unique = f"ok_{uuid.uuid4().hex[:6]}"
+        self.assertEqual(self.xml_proxy.filter_text(unique), unique)
 
     def test_pyro_filter_text(self):
-        service = Pyro4.Proxy("PYRONAME:insult.filter")
-        result = service.filter_text("insult1")
-        self.assertEqual(result, "CENSORED")
+        self.assertEqual(self.pyro_proxy.filter_text("insult2"), "CENSORED")
+        unique = f"py_{uuid.uuid4().hex[:6]}"
+        self.assertEqual(self.pyro_proxy.filter_text(unique), unique)
 
     def test_redis_filter_text(self):
-        self.r.rpush('texts_queue', "insult1")
-        time.sleep(1)  # Wait for worker to process
-        filtered = self.r.lpop('filtered_texts')
-        if filtered:
-            filtered = filtered.decode('utf-8') if isinstance(filtered, bytes) else filtered
-        self.assertEqual(filtered, "CENSORED")
+        # push message into Redis list
+        self.r.rpush("texts_queue", "insult1")
+        # worker writes result to "filtered" list
+        key_val = self.r.brpop("filtered", timeout=3)
+        self.assertIsNotNone(key_val, "Redis worker did nothing")
+        self.assertEqual(key_val[1], "CENSORED")
 
     def test_rabbitmq_filter_text(self):
-        self.rabbit_ch.basic_publish(exchange='', routing_key='texts', body="insult1".encode())
-        # Placeholder: RabbitMQ verification requires checking service output
-        self.assertTrue(True)
+        con = pika.BlockingConnection(pika.ConnectionParameters("localhost"))
+        ch = con.channel()
+        ch.basic_publish('', 'texts', body=b"insult2")
+        con.close()
+        self.assertTrue(True)    # if we reach here, OK
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

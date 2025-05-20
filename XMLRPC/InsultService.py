@@ -1,6 +1,7 @@
 from xmlrpc.server import SimpleXMLRPCServer
 import threading
 import time
+import random
 
 insults = set()
 
@@ -13,11 +14,11 @@ class InsultService:
 
     def get_insults(self):
         return list(insults)
-
     def broadcaster(self):
-        # XMLRPC no soporta broadcasting directo, se simula con polling
-         if insults:
+        # XMLRPC does not support callbacks directly, but we can simulate it
+        if insults:
             return random.choice(list(insults))
+        return None
         return None
 
 if __name__ == "__main__":
