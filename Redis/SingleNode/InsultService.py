@@ -60,13 +60,13 @@ while True:
     data = petition["data"]
 
     match operation:
-        case "Z":
+        case "ADD_INSULT":
             service.add_insult(data)
         
-        case "O":
+        case "LIST":
             service.retrieve_insults(data)
 
-        case "V":
+        case "BCAST_START":
             print("Activating broadcast")
             with Manager() as manager:
                 stop = Event()
@@ -74,7 +74,7 @@ while True:
                 service.process = Process(target=service.random_events, args=(stop,))
                 service.process.start()
         
-        case "X":
+        case "BCAST_STOP":
             if service.process is not None:
                 stop.set()
                 service.process.join()

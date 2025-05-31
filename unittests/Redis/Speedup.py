@@ -11,12 +11,11 @@ from itertools import cycle
 # Chose depending on cpu cores number
 n_producers = 8
 
-
 def initialize_insults():
     client.ltrim("redis_insult_list", 1, 0)
     for insult in insult_list:
         petition = {
-            "operation": "Z",
+            "operation": "SUBMIT_TEXT",
             "data": insult
         }
         client.lpush(service_queues[0], json.dumps(petition))
@@ -32,7 +31,7 @@ def petition_queues(nodes):
 def spam__void_petitions(number_petitions):
     service_rr = cycle(service_queues)
     petition = {
-        "operation": "Y",
+        "operation": "PROCESS_ONE",
         "data": ""
     }
     for _ in range(number_petitions):
@@ -116,7 +115,7 @@ if __name__ == "__main__":
     plt.figure(figsize=(8, 4))
     plt.plot(workers, workers, 'r--', label='Ideal')
     plt.plot(workers, speedup, 'b-o', label='Medido')
-    plt.xlabel('Nodos de filtro')
+    plt.xlabel('(InsultFilter) Nodes')
     plt.ylabel('Speedup')
     plt.title('SpeedUp Redis')
     plt.legend()

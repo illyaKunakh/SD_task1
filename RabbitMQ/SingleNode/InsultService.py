@@ -60,11 +60,11 @@ def getInsultList(ch, method, properties, body):
 def callback(ch, method, properties, body):
     value = body.decode()
     print(f" [x] Received {value}")
-    if value == 'Z':
+    if value == 'RANDOM_INSULT':
         getInsult(ch, method, properties, body)
-    elif value == 'O':
+    elif value == 'BCAST_START':
         startBroadcast()
-    elif value == 'V':
+    elif value == 'BCAST_STOP':
         stopBroadcast()
     elif value == 'X':
         getInsultList(ch, method, properties, body)

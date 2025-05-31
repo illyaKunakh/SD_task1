@@ -46,13 +46,13 @@ while True:
     data = petition["data"]
 
     match operation:
-        case "Z":
+        case "SUBMIT_TEXT":
             filter.add_petition(data)
         
-        case "O":
+        case "PROCESS_ONE":
             filter.resolve_petition()
 
-        case "V":
+        case "GET_RESULTS":
             filter.retrieve_resolutions(data)
 
         case _:

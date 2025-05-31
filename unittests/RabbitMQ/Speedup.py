@@ -6,8 +6,6 @@ import subprocess
 from pathlib import Path
 import random
 
-# We need active (active in order):
-# Any
 class SpeedupTestService:
     def __init__(self):
         self.number_process = 8
@@ -61,15 +59,14 @@ class SpeedupTestService:
 
     def do_tests(self):
         procs = []
-        #queues = list(self.filter_queues)
+        #Starting 3 InsultFilter servers
         for servers in range(3):
-            # queue = queues.pop(0)
-            # print(queue)
-            proc = subprocess.Popen(['python3', self.path_worker],#@, '--queue', queue]
-                                    stdout = subprocess.DEVNULL)
+            proc = subprocess.Popen(['python3', self.path_worker], stdout = subprocess.DEVNULL)
             procs.append(proc)
             time.sleep(2)
+            # Run test when 3 workers started
             self.run_test(self.requests, servers)
+        # Terminate all processes when tests are done
         for proc in procs:
             proc.terminate()
             proc.wait()
@@ -86,7 +83,7 @@ if __name__ == '__main__':
     speed_up = [val/test.consumer_rate[0] for val in test.consumer_rate]
     #plt.plot(num_servers, test.message_process, 'b-', label='Real')
     plt.plot(num_servers, speed_up, 'b-o', label='Real')
-    plt.xlabel('Servers')
+    plt.xlabel('(InsultFilter) Nodes')
     plt.ylabel('Speedup')
     plt.legend()
     plt.grid(True)
