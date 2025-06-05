@@ -12,12 +12,17 @@ class StressTestService:
         self.consumer_rate = []
         self.requests = [1000, 2000, 5000, 10000]
 
+    # Sends insults to the InsultFilter service via RabbitMQ.
+    # 1. Connects to RabbitMQ server.
+    # 2. Declares a response queue for receiving replies.
+    # 3. Publishes 'requests' number of messages to the 'insult_filter_queue'.
+    # 4. Waits for all responses to be received.
+    # 5. Closes the connection. 
     def send_insult(self, requests, i):
         # Conectar a RabbitMQ
         connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
         channel = connection.channel()
 
-        # Aseguramos la cola de filtros
         channel.queue_declare(queue='insult_filter_queue')
 
         # Creamos cola temporal para respuestas
@@ -42,9 +47,11 @@ class StressTestService:
 
         connection.close()
 
+    # Runs test with specified number of producers and requests.
     def run_test(self, request):
         print(f"Test → {request} peticiones")
         procs = []
+        # Start n producers that execute the send_insult function
         for i in range(self.number_process):
             p = multiprocessing.Process(target=self.send_insult, args=(request, i))
             procs.append(p)
@@ -58,6 +65,15 @@ class StressTestService:
         self.consumer_rate.append(rate)
         print(f"  Tiempo total: {elapsed:.2f}s — Throughput: {rate:.2f} msg/s")
 
+    # Executes the producers 
+    # 1. Runs each load scenario defined in self.requests.
+    # 2. Cleans the RabbitMQ queue to leave it ready for the next test.
+    # 3. Closes the connection.
+    # 4. Displays the throughput graph.
+    # 5. Terminates the InsultFilter service process.
+    # 6. Waits for the process to finish.
+    # 7. Cleans up the RabbitMQ connection.
+    # 8. Plots the speedup graph.
     def do_tests(self):
         # Ejecuta cada escenario de carga
         for req in self.requests:
@@ -69,9 +85,16 @@ class StressTestService:
         ch.queue_purge(queue='insult_filter_queue')
         conn.close()
 
+# Executes the stress test for the InsultFilter service.
+# 1. Starts the InsultFilter service in the background.
+# 2. Runs the stress test.
+# 3. Displays the throughput graph.
+# 4. Terminates the InsultFilter service process.
+# 5. Waits for the process to finish.
+# 6. Cleans up the RabbitMQ connection.
 if __name__ == '__main__':
     # 1) Arrancar el filtro en background
-    filter_script = Path(__file__).parent.parent / ".." / 'RabbitMQ' / 'InsultFilter.py'
+    filter_script = Path(__file__).parent.parent.parent / 'RabbitMQ' / 'InsultFilter.py'
     if not filter_script.exists():
         print(f"ERROR: no encontrado {filter_script}", file=sys.stderr)
         sys.exit(1)

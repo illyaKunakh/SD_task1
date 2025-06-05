@@ -9,8 +9,11 @@ import random
 from itertools import cycle
 
 # Chose depending on cpu cores number
-n_producers = 8
+n_producers = 4
 
+# List of insults to be used in the tests
+# 1. This list can be extended with more insults.
+# 2. The insults are used to populate the Redis list 'redis_insult_list'.
 def initialize_insults():
     client.ltrim("redis_insult_list", 1, 0)
     for insult in insult_list:
@@ -20,6 +23,7 @@ def initialize_insults():
         }
         client.lpush(service_queues[0], json.dumps(petition))
 
+# Creates a list of service queues based on the number of nodes.
 def petition_queues(nodes):
     global service_queues
     service_queues = []
@@ -27,7 +31,7 @@ def petition_queues(nodes):
         service_queues.append("client_messages_service" + str(i + 1))
     print("Service queues:", service_queues)
 
-# Spam de peticiones vacías
+# Spam of void petitions to the service queues.
 def spam__void_petitions(number_petitions):
     service_rr = cycle(service_queues)
     petition = {
@@ -38,6 +42,12 @@ def spam__void_petitions(number_petitions):
         client.lpush(next(service_rr), json.dumps(petition))
         client.incr("number_pushes")
 
+# 1. Start the spam of void petitions to the service queues.
+# 2. Create the service queues based on the number of nodes.
+# 3. Initialize the insults in Redis.
+# 4. Run the tests with the specified number of petitions and processes.
+# 5. Collect the elapsed time for each test.
+# 6. Plot the speedup graph.
 def run_tests(number_petitions, number_process):
     processes = []
     start = time.time()
@@ -50,7 +60,7 @@ def run_tests(number_petitions, number_process):
     for p in processes:
         p.join()
 
-    # Esperamos a que todas las pushes hayan sido contabilizadas
+    # Wait until all petitions are processed
     while int(client.get("number_pushes")) < number_petitions * n_producers:
         time.sleep(0.01)
 
@@ -59,31 +69,28 @@ def run_tests(number_petitions, number_process):
     print(f"  Time: {elapsed:.2f}s — Rate: {rate:.2f} msg/s")
     return elapsed
 
+
 if __name__ == "__main__":
-    # Conexión a Redis
     client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
     client.set("insult_service_instance_id", 0)
 
-    # Ruta al script InsultFilter.py
-    filter_script = Path(__file__).parent.parent / ".." / "Redis" / "MultipleNode" / "InsultFilter.py"
+    filter_script = Path(__file__).parent.parent.parent / "Redis" / "InsultFilter.py"
     if not filter_script.exists():
         print(f"ERROR: no he encontrado {filter_script}", file=sys.stderr)
         sys.exit(1)
 
-    # Parámetros de test
     insult_list = ['insult1', 'insult2', 'insult3', 'insult4', 'insult5', 'insult6', 'insult7', 'insult8', 'insult9']
-    number_petitions = 100000
+    number_petitions = 10000
     nodes = 3
 
-    # Limpiamos colas previas
+    # Clean previous data in Redis
     for i in range(nodes):
         client.delete(f"client_messages_service{i + 1}")
 
     results = {}
 
-    # Para 1, 2 y 3 instancias de filtro
+    # For 1, 2 and 3 nodes of IF
     for service in range(nodes):
-        # Arrancamos (service+1) instancias de InsultFilter.py
         procs = []
         for _ in range(service + 1):
             p = subprocess.Popen(
@@ -93,7 +100,7 @@ if __name__ == "__main__":
             procs.append(p)
             time.sleep(1)  # Dejamos que arranque
 
-        # Preparar colas y datos
+        # Set the service queues and initialize insults
         petition_queues(service + 1)
         initialize_insults()
         client.set("number_pushes", 0)
@@ -101,7 +108,6 @@ if __name__ == "__main__":
         elapsed = run_tests(number_petitions, n_producers)
         results[service] = elapsed
 
-        # Detenemos los filtros
         for p in procs:
             p.terminate()
             p.wait()

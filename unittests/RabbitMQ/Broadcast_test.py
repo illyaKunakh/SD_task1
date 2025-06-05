@@ -4,40 +4,43 @@ import pika
 
 # Configuración
 ROOT = Path(__file__).resolve().parents[2]
-BC_PATH = ROOT / 'RabbitMQ' / 'MultipleNode' / 'InsultBroadcaster.py'
+SVC_PATH = ROOT / 'RabbitMQ' / 'InsultService.py'
 SUB_PATH = ROOT / 'RabbitMQ' / 'Subscriber.py'
 N_SUBS    = 3      
-TEST_SECS = 15     # sseconds of broadcast
+TEST_SECS = 15     # seconds of broadcast
 
-spawn = lambda path: subprocess.Popen([sys.executable, str(path)])
+# Función para lanzar un proceso de InsultService o Subscriber
+spawn = lambda path, *args: subprocess.Popen([sys.executable, str(path)] + list(args))
 
+# Function for sending commands to the RabbitMQ service
+# It connects to RabbitMQ, declares the queue, and sends the command.
+# The connection is closed after sending the command.
 def send(cmd: str):
-    """Publica 'start' o 'stop' en broadcast_queue"""
     conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-    ch = conn.channel(); ch.queue_declare(queue='broadcast_queue')
-    ch.basic_publish('', 'broadcast_queue', cmd)
+    ch = conn.channel(); ch.queue_declare(queue='request_queue')
+    ch.basic_publish('', 'request_queue', cmd)
     conn.close()
 
-print('[TEST] Launching broadcaster…')
-broad = spawn(BC_PATH)
+print('[TEST] Launching InsultService with broadcast…')
+broad = spawn(SVC_PATH, '--broadcast')
 
 # Waiting for connection
-time.sleep(2)
+time.sleep(1)
 
-# Launching n sbscribers
+# Launching n subscribers
 print(f'[TEST] Lanzando {N_SUBS} subscriptores…')
 subs = [spawn(SUB_PATH) for _ in range(N_SUBS)]
 
-time.sleep(2)
-print('[TEST] → start')
-send('start')
+time.sleep(1)
+print('[TEST] → BCAST_START')
+send('BCAST_START')
 
 time.sleep(TEST_SECS)
-print('[TEST] → stop')
-send('stop')
+print('[TEST] → BCAST_STOP')
+send('BCAST_STOP')
 
 # Shutdown 
-time.sleep(2)
+time.sleep(1)
 for p in subs:
     p.terminate(); p.wait()
 broad.terminate(); broad.wait()

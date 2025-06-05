@@ -17,7 +17,7 @@ class DynamicWorkerManager:
         self.worker_counts = self.manager.list()
         self.interval = 1  # Interval to adjust workers (in seconds)
         self.worker_capacity = 200  # Maximum messages per second a worker can handle
-        self.path_worker = Path(__file__).parent.parent.parent / 'RabbitMQ' / 'InsultFilter.py'
+        self.path_worker = Path(__file__).parent.parent / 'RabbitMQ' / 'InsultFilter.py'
 
     def start_worker(self):
         """Launches a real worker process from InsultFilter.py."""

@@ -9,12 +9,12 @@ import random
 from itertools import cycle
 import matplotlib.pyplot as plt
 
-# Número máximo de procesos concurrentes (según CPU)
-max_cpu = 8
 
-# Peticiones a probar
-number_petitions = [1000, 2000, 5000, 10000, 50000, 100000, 500000]
+max_cpu = 4
+number_petitions = [1000, 2000, 5000, 10000]
 
+# 1. Create a list of insults to be used in the tests.
+# 2. The insults are used to populate the Redis list 'redis_insult_list'.
 def spam__void_petitions(number_petitions):
     petition = {
         "operation": "Y",
@@ -24,6 +24,7 @@ def spam__void_petitions(number_petitions):
         client.lpush(service_queue, json.dumps(petition))
         client.incr("number_pushes")
 
+# Run the processes that will spam the service queues with void petitions.
 def run_tests(number_petitions, number_process):
     processes = []
     start = time.time()
@@ -45,18 +46,18 @@ def run_tests(number_petitions, number_process):
     return rate
 
 if __name__ == "__main__":
-    # Conexión a Redis
     client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
     service_queue = "client_messages_service"
-    client.delete("client_messages_service")      # limpiamos
+    client.delete("client_messages_service")      # cleaning
     client.delete("number_pushes")
 
-    # Arrancamos 1 instancia de InsultFilter.py
-    filter_script = Path(__file__).parent.parent / ".." / "Redis" / "MultipleNode" / "InsultFilter.py"
+    
+    filter_script = Path(__file__).parent.parent.parent / "Redis" / "InsultFilter.py"
     if not filter_script.exists():
         print(f"ERROR: no he encontrado {filter_script}", file=sys.stderr)
         sys.exit(1)
 
+    # Start the Redis InsultFilter.py service in the background
     proc = subprocess.Popen(
         [sys.executable, str(filter_script)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
