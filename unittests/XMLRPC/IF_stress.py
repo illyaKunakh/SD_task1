@@ -9,7 +9,7 @@ from pathlib import Path
 class StressTestService:
     def __init__(self):
         self.number_process = 8
-        self.requests = [1000, 2000, 5000, 10000]
+        self.requests = [1000, 2000, 5000, 10000, 50000, 500000]
         self.consumer_rate = []
         self.server_url = "http://localhost:8001"
     
@@ -22,10 +22,21 @@ class StressTestService:
         try:
             proxy = xmlrpc.client.ServerProxy(self.server_url)
             
-            for i in range(requests_per_producer):
-                # Send a test message to be filtered
-                test_message = f"Test message {idx}_{i}"
-                result = proxy.submit_text(test_message)
+            # First submit texts for filtering, then get results and queue info
+            submit_count = requests_per_producer // 2
+            query_count = requests_per_producer - submit_count
+            
+            # Submit texts for filtering
+            for i in range(submit_count):
+                text = f"Stress text from producer {idx}_{i} with insult{(i % 9) + 1} and insult{((i + 1) % 9) + 1}"
+                result = proxy.submit_text(text)
+            
+            # Query results and queue status
+            for i in range(query_count):
+                if i % 2 == 0:
+                    result = proxy.get_queue_size()
+                else:
+                    result = proxy.get_results_count()
                 
         except Exception as e:
             print(f"Error in producer {idx}: {e}")
@@ -95,7 +106,7 @@ if __name__ == '__main__':
     test.do_tests()
 
     # 3) Show results graph
-    total_requests = [r * test.number_process for r in test.requests]
+    total_requests = [r * 1 for r in test.requests]
     plt.figure(figsize=(8, 4))
     plt.plot(total_requests, test.consumer_rate, 'b-o', label='Messages/s')
     plt.xlabel('Total Requests')
@@ -105,7 +116,7 @@ if __name__ == '__main__':
     plt.legend()
     plt.tight_layout()
     plt.show()
-
+    plt.savefig('IF-X_stress_test_results.png')
     # 4) Stop the filter service
     filter_proc.terminate()
     filter_proc.wait()

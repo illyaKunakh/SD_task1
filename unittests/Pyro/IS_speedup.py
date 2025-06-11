@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import xmlrpc.client
+import Pyro4
 import multiprocessing
 import time
 import matplotlib.pyplot as plt
@@ -8,22 +8,24 @@ import subprocess
 import sys
 from pathlib import Path
 
-class SpeedupTestXMLRPCService:
+class SpeedupTestPyro4Service:
     def __init__(self):
         self.number_process = 4  # number of producers
         self.requests_per_producer = 10000
         self.consumer_rate = []
-        self.base_port = 8000    # starting port for XML-RPC servers
+        self.base_port = 9090    # starting port for Pyro4 servers
 
-    # Sends requests to multiple InsultService instances via XML-RPC.
+    # Sends requests to multiple InsultService instances via Pyro4.
     # Uses round-robin to distribute requests across servers.
     def _send_requests(self, n_requests: int, num_servers: int):
         try:
             # Create connections to all available servers
             servers = []
             for i in range(num_servers):
-                url = f"http://localhost:{self.base_port + i}"
-                servers.append(xmlrpc.client.ServerProxy(url))
+                port = self.base_port + i
+                uri = f"PYRO:insult.service@localhost:{port}"
+                proxy = Pyro4.Proxy(uri)
+                servers.append(proxy)
             
             # Send requests using round-robin
             store_count = n_requests // 2
@@ -51,7 +53,7 @@ class SpeedupTestXMLRPCService:
     # 3. Appends the throughput to self.consumer_rate for later analysis.
     # 4. Prints the results of the test.
     def run_test(self, num_servers: int):
-        print(f"\n[Test XML-RPC] → Testing with {num_servers} InsultService node(s)...")
+        print(f"\n[Test Pyro4] → Testing with {num_servers} InsultService node(s)...")
         
         # Start producers that will send requests to the services
         producers = []
@@ -78,7 +80,7 @@ class SpeedupTestXMLRPCService:
         """
         Runs tests for 1, 2 and 3 service instances. Then plots speedup graph.
         """
-        service_script = Path(__file__).parent.parent.parent / 'XMLRPC' / 'InsultService.py'
+        service_script = Path(__file__).parent.parent.parent / 'Pyro' / 'InsultService.py'
         if not service_script.exists():
             print(f"ERROR: no encontrado {service_script}", file=sys.stderr)
             sys.exit(1)
@@ -96,15 +98,16 @@ class SpeedupTestXMLRPCService:
                 stderr=subprocess.DEVNULL
             )
             procs_service.append(p)
-            time.sleep(2)  # Wait for server to start
+            time.sleep(3)  # Wait for Pyro4 server to start (longer than XML-RPC)
             
-            # Initialize servers with some insults
+            # Initialize servers with some insults for testing
             try:
-                proxy = xmlrpc.client.ServerProxy(f"http://localhost:{port}")
+                uri = f"PYRO:insult.service@localhost:{port}"
+                proxy = Pyro4.Proxy(uri)
                 for i in range(10):
                     proxy.store_insult(f"Initial insult {i}")
-            except:
-                pass
+            except Exception as e:
+                print(f"Warning: Could not initialize server on port {port}: {e}")
             
             # Run test with current number of servers
             self.run_test(servers + 1)
@@ -127,14 +130,14 @@ class SpeedupTestXMLRPCService:
         plt.plot(nodes, real, 'b-o', label='Real')
         plt.xlabel('Number of InsultService instances')
         plt.ylabel('Speedup (relative_throughput)')
-        plt.title('SpeedUp XML-RPC → InsultService')
+        plt.title('SpeedUp Pyro4 → InsultService')
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig('ISXSpeed.png')
+        plt.savefig('ISPyroSpeed.png')
         plt.show()
 
 
 if __name__ == "__main__":
-    tester = SpeedupTestXMLRPCService()
+    tester = SpeedupTestPyro4Service()
     tester.do_speedup()

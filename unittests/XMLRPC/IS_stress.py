@@ -9,7 +9,7 @@ from pathlib import Path
 class StressTestService:
     def __init__(self):
         self.number_process = 8
-        self.requests = [1000, 2000, 5000, 10000]
+        self.requests = [1000, 2000, 5000, 10000, 50000]
         self.consumer_rate = []
         self.server_url = "http://localhost:8000"
     
@@ -105,7 +105,7 @@ if __name__ == '__main__':
     test.do_tests()
 
     # 3) Show results graph
-    total_requests = [r * test.number_process for r in test.requests]
+    total_requests = [r * 1 for r in test.requests]
     plt.figure(figsize=(8, 4))
     plt.plot(total_requests, test.consumer_rate, 'b-o', label='Messages/s')
     plt.xlabel('Total Requests')
@@ -114,6 +114,8 @@ if __name__ == '__main__':
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
+    plt.savefig('ISXstress_test_results.png')
+
     plt.show()
 
     # 4) Stop the service

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import xmlrpc.client
+import Pyro4
 import multiprocessing
 import time
 import matplotlib.pyplot as plt
@@ -13,23 +13,25 @@ class SpeedupTestService:
         self.number_process = 4  # number of producers
         self.requests = 10000    # messages per producer
         self.consumer_rate = []
-        self.base_port = 8001    # starting port for XML-RPC servers
+        self.base_port = 9091    # starting port for Pyro4 servers
     
-    # Sends insults to the InsultFilter service via XML-RPC.
+    # Sends insults to the InsultFilter service via Pyro4.
     # Uses round-robin to distribute requests across multiple servers.
     def send_insult(self, requests, num_servers):
         try:
             # Create connections to all available servers
             servers = []
             for i in range(num_servers):
-                url = f"http://localhost:{self.base_port + i}"
-                servers.append(xmlrpc.client.ServerProxy(url))
+                port = self.base_port + i
+                uri = f"PYRO:insult.filter@localhost:{port}"
+                proxy = Pyro4.Proxy(uri)
+                servers.append(proxy)
             
             # Send requests using round-robin
             for i in range(requests):
                 server_idx = i % num_servers
                 proxy = servers[server_idx]
-                test_message = f"Test message {i}"
+                test_message = f"Test message {i} with insult1"
                 result = proxy.submit_text(test_message)
                 
         except Exception as e:
@@ -64,7 +66,7 @@ class SpeedupTestService:
     # 3. Terminates all processes after tests are done.
     # 4. Plots the speedup graph.
     def do_tests(self):
-        filter_script = Path(__file__).parent.parent.parent / 'XMLRPC' / 'InsultFilter.py'
+        filter_script = Path(__file__).parent.parent.parent / 'Pyro' / 'InsultFilter.py'
         if not filter_script.exists():
             print(f"ERROR: no encontrado {filter_script}", file=sys.stderr)
             sys.exit(1)
@@ -81,7 +83,7 @@ class SpeedupTestService:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             procs.append(proc)
-            time.sleep(2)  # Wait for server to start
+            time.sleep(3)  # Wait for Pyro4 server to start (longer than XML-RPC)
             
             # Run test with current number of servers
             self.run_test(servers + 1)
@@ -105,6 +107,6 @@ if __name__ == '__main__':
     plt.ylabel('Speedup')
     plt.legend()
     plt.grid(True)
-    plt.title("SpeedUp XML-RPC InsultFilter")
-    plt.savefig('IFXSpeed.png')
+    plt.title("SpeedUp Pyro4 InsultFilter")
+    plt.savefig('IFPyroSpeed.png')
     plt.show()
